@@ -1,0 +1,33 @@
+{
+  "name": "pi-port",
+  "version": "0.1.0",
+  "description": "Export and import pi agent configuration between machines",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "author": "Andrew Jacop",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andrewjacop/pi-port.git"
+  },
+  "homepage": "https://github.com/andrewjacop/pi-port#readme",
+  "main": "extensions/pi-port.ts",
+  "scripts": {
+    "test": "node --test --import tsx 'test/**/*.test.ts'"
+  },
+  "pi": {
+    "extensions": [
+      "extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^6.0.3"
+  }
+}
