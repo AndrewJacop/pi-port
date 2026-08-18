@@ -180,13 +180,18 @@ function toEnvVarName(field: string): string {
 /** Common guard for the cloud commands. Returns true when safe to continue. */
 async function requireVsync(ctx: {
 	mode?: string;
-	ui: { notify(m: string, t?: "info" | "warning" | "error"): void };
+	ui: {
+		notify(m: string, t?: "info" | "warning" | "error"): void;
+		setStatus?(key: string, value: string | undefined): void;
+	};
 }): Promise<boolean> {
 	if (ctx.mode !== "tui") {
 		ctx.ui.notify("pi-port needs interactive mode", "error");
 		return false;
 	}
+	ctx.ui.setStatus?.("pi-port", "checking vsync…");
 	const version = await vsyncVersion();
+	ctx.ui.setStatus?.("pi-port", undefined);
 	if (!version) {
 		ctx.ui.notify(
 			"vsync not found on PATH — install it with `npm install -g vasari-sync`, then retry.",
@@ -439,7 +444,9 @@ export default function piPort(pi: ExtensionAPI): void {
 			// 1.5 gh CLI prefill (github-repo): an authenticated `gh` offers
 			// the owner via confirm (pi inputs have no submit-default — the 2nd
 			// arg is a placeholder) and vsync auto-reuses its token when blank.
+			ctx.ui.setStatus("pi-port", "checking GitHub CLI…");
 			const gh = backend === "github-repo" ? await ghLogin() : null;
+			ctx.ui.setStatus("pi-port", undefined);
 			if (gh)
 				ctx.ui.notify(
 					`GitHub CLI detected — signed in as ${gh}; owner/token can be accepted with one keypress`,
@@ -458,7 +465,9 @@ export default function piPort(pi: ExtensionAPI): void {
 					continue;
 				}
 				if (backend === "github-repo" && field.name === "repo" && gh) {
+					ctx.ui.setStatus("pi-port", "listing your GitHub repos…");
 					const repos = await ghRepos();
+					ctx.ui.setStatus("pi-port", undefined);
 					if (repos && repos.length > 0) {
 						const MANUAL = "Type a name/URL manually…";
 						const choice = await ctx.ui.select(field.label, [
@@ -688,8 +697,8 @@ export default function piPort(pi: ExtensionAPI): void {
 				await ensureProject(root);
 				await defaultRunner(["pull", "--json"]);
 
-				// 3. Diff by session id.
-				const diff = await diffSessions(bucket, stagedDir);
+				// 3. Diff by session id (header-normalized: staged cwd = label).
+				const diff = await diffSessions(bucket, stagedDir, label);
 				ctx.ui.setStatus("pi-port", undefined);
 				if (
 					diff.localOnly.length === 0 &&
@@ -700,15 +709,44 @@ export default function piPort(pi: ExtensionAPI): void {
 					return;
 				}
 
-				// 4. Counts + newest timestamps per side, then direction.
+				// 4. Counts + newest timestamps per side, then direction. Zero rows
+				// stay bare (no "(newest unknown)" noise); collisions show which
+				// side is newer per the same mtime rule push/pull apply.
 				const newest = (ts: (string | undefined)[]): string =>
 					ts.filter(Boolean).sort().at(-1) ?? "unknown";
+				const row = (name: string, n: number, ts: (string | undefined)[]) =>
+					`${name}: ${n}` + (n > 0 ? ` (newest ${newest(ts)})` : "");
+				let collisionNote = "";
+				if (diff.collisions.length > 0) {
+					let localNewer = 0;
+					for (const info of diff.collisions) {
+						const stagedMtime = await stat(join(stagedDir, info.file))
+							.then((s) => s.mtimeMs)
+							.catch(() => 0);
+						if (info.mtimeMs > stagedMtime) localNewer++;
+					}
+					collisionNote = ` (local newer: ${localNewer}, remote newer: ${diff.collisions.length - localNewer})`;
+				}
 				const summary =
-					`Local ahead: ${diff.localOnly.length} (newest ${newest(diff.localOnly.map((s) => s.timestamp))})\n` +
-					`Remote ahead: ${diff.stagedOnly.length} (newest ${newest(diff.stagedOnly.map((s) => s.timestamp))})\n` +
-					`Same id, different content: ${diff.collisions.length}`;
-				const options = ["Push (local → cloud)", "Pull (cloud → local)"];
-				if (diff.collisions.length === 0) options.push("Both");
+					`${row(
+						"Local ahead",
+						diff.localOnly.length,
+						diff.localOnly.map((s) => s.timestamp),
+					)}\n` +
+					`${row(
+						"Remote ahead",
+						diff.stagedOnly.length,
+						diff.stagedOnly.map((s) => s.timestamp),
+					)}\n` +
+					`Same id, different content: ${diff.collisions.length}${collisionNote}`;
+				const options = [
+					"Push (local → cloud)",
+					"Pull (cloud → local)",
+					// Bidirectional, newest-wins-per-file: pushes local-new +
+					// locally-newer collisions, pulls remote-new + remotely-newer
+					// collisions — the two branches' mtime rules are complementary.
+					"Reconcile (both ways, newest wins)",
+				];
 				options.push("Cancel");
 				const choice = await ctx.ui.select(
 					`Sessions for '${label}' (${ctx.cwd}):\n${summary}\n\nDirection?`,
@@ -725,7 +763,7 @@ export default function piPort(pi: ExtensionAPI): void {
 						`⚠️ Secret scan: ${hits.join(", ")} (values not shown)`,
 					);
 
-				if (choice.startsWith("Push") || choice === "Both") {
+				if (choice.startsWith("Push") || choice.startsWith("Reconcile")) {
 					// 5. Stage local-new + locally-newer collisions → push.
 					ctx.ui.setStatus("pi-port", "staging sessions…");
 					const rels: string[] = [];
@@ -764,7 +802,7 @@ export default function piPort(pi: ExtensionAPI): void {
 					);
 				}
 
-				if (choice.startsWith("Pull") || choice === "Both") {
+				if (choice.startsWith("Pull") || choice.startsWith("Reconcile")) {
 					// 6. Restore staged-only + collisions → local bucket (idempotent).
 					// Collisions respect last-edited-wins: local is kept when it is newer.
 					ctx.ui.setStatus("pi-port", "restoring sessions…");

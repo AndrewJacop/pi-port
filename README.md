@@ -74,6 +74,12 @@ Syncs sessions **for the project pi is opened in**. Because pi stores sessions u
 
 Sessions are diffed by session id, so nothing is duplicated and the usual flow is: work on machine A → push; sit down at machine B → pull → A's sessions appear in `/resume` immediately. A session changed on both machines (rare) resolves last-edited-wins.
 
+When the two sides differ you pick a direction:
+
+- **Push** — upload local-only and locally-newer sessions.
+- **Pull** — download remote-only and remotely-newer sessions.
+- **Reconcile** — both ways at once, newest-wins per session: pushes what's local-new/newer, pulls what's remote-new/newer. One keypress instead of two rounds.
+
 ### What syncs where
 
 | | Local archive | Cloud sync |
@@ -148,7 +154,7 @@ The format is versioned. Importing a backup made by a newer Pi Port than you hav
 git clone https://github.com/andrewjacop/pi-port
 cd pi-port
 npm install
-npm test          # 54 unit tests (paths, staging, scan, vsync wrapper, remap)
+npm test          # 55 unit tests (paths, staging, scan, vsync wrapper, remap)
 npx tsc --noEmit  # typecheck
 ```
 

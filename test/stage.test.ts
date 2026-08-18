@@ -151,16 +151,18 @@ test("diffSessions: local-only, staged-only, collision, same-content skip", asyn
 	const t = await tmp();
 	const bucket = join(t, "bucket");
 	const staged = join(t, "staged");
+	const LABEL = "myproj";
 	await writeSession(bucket, "a.jsonl", "id-a", "/local/path", "one\n");
 	await writeSession(bucket, "b.jsonl", "id-b", "/local/path", "two\n");
 	await writeSession(bucket, "c.jsonl", "id-c", "/local/path", "three-v1\n");
-	await writeSession(staged, "c.jsonl", "id-c", "label", "three-v2\n");
-	await writeSession(staged, "d.jsonl", "id-d", "label", "four\n");
-	// Same id, same CONTENT counts as in sync (header cwd differs? make it identical to be fair):
-	await writeSession(bucket, "e.jsonl", "id-e", "label", "five\n");
-	await writeSession(staged, "e.jsonl", "id-e", "label", "five\n");
+	await writeSession(staged, "c.jsonl", "id-c", LABEL, "three-v2\n");
+	await writeSession(staged, "d.jsonl", "id-d", LABEL, "four\n");
+	// Same id + same body, DIFFERENT header cwd (local path vs label) — the
+	// normalization must treat this as in sync, not a collision.
+	await writeSession(bucket, "e.jsonl", "id-e", "/local/path", "five\n");
+	await writeSession(staged, "e.jsonl", "id-e", LABEL, "five\n");
 
-	const diff = await diffSessions(bucket, staged);
+	const diff = await diffSessions(bucket, staged, LABEL);
 	assert.deepEqual(diff.localOnly.map((s) => s.file).sort(), [
 		"a.jsonl",
 		"b.jsonl",
@@ -177,8 +179,36 @@ test("diffSessions: local-only, staged-only, collision, same-content skip", asyn
 
 test("diffSessions: missing dirs are empty diffs, not errors", async () => {
 	const t = await tmp();
-	const diff = await diffSessions(join(t, "nope1"), join(t, "nope2"));
+	const diff = await diffSessions(join(t, "nope1"), join(t, "nope2"), "x");
 	assert.deepEqual(diff, { localOnly: [], stagedOnly: [], collisions: [] });
+});
+
+test("diffSessions: staged copy of identical content is in sync (header-rewrite regression)", async () => {
+	// The user-hit bug: after a successful push, every session showed as
+	// "same id, different content" because raw-byte compare sees the header
+	// cwd difference (abs path vs label) that staging introduces by design.
+	const t = await tmp();
+	const bucket = join(t, "bucket");
+	const stagedDir = join(t, "staged");
+	const LABEL = "pi-port";
+	await writeSession(bucket, "s1.jsonl", "id-1", "D:\\Me\\pi-port", "hello\n");
+	await writeSession(bucket, "s2.jsonl", "id-2", "D:\\Me\\pi-port", "world\n");
+	// Real staging transform, exactly what a push does:
+	await stageSession(
+		join(bucket, "s1.jsonl"),
+		join(stagedDir, "s1.jsonl"),
+		LABEL,
+	);
+	await stageSession(
+		join(bucket, "s2.jsonl"),
+		join(stagedDir, "s2.jsonl"),
+		LABEL,
+	);
+
+	const diff = await diffSessions(bucket, stagedDir, LABEL);
+	assert.equal(diff.localOnly.length, 0);
+	assert.equal(diff.stagedOnly.length, 0);
+	assert.equal(diff.collisions.length, 0);
 });
 
 // ───────────────────────────────────────────── session stage/restore (IO)

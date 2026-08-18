@@ -6,7 +6,7 @@
 // runner is injectable so tests can fake the CLI.
 
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -56,11 +56,14 @@ function winQuote(a: string): string {
 	return `"${a.replace(/"/g, '""')}"`;
 }
 
-function spawnVsync(
+async function spawnVsync(
 	args: string[],
 	cwd: string,
 	env?: Record<string, string>,
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+	// First-ever run: the staging tree (spawn cwd) may not exist yet —
+	// cmd.exe ENOENTs on a missing cwd before vsync even starts.
+	await mkdir(cwd, { recursive: true }).catch(() => undefined);
 	return new Promise((resolve, reject) => {
 		// Every spawn pins --config to pi-port's private file: full isolation
 		// from any ~/.vsync/config.json the user keeps for their own vsync

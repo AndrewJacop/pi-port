@@ -392,6 +392,8 @@ async function readSessionDir(dir: string): Promise<Map<string, SessionInfo>> {
 export async function diffSessions(
 	bucketDir: string,
 	stagedDir: string,
+	/** Project label — staged headers carry the label, not the local path. */
+	label: string,
 ): Promise<SessionDiff> {
 	const local = await readSessionDir(bucketDir);
 	const staged = await readSessionDir(stagedDir);
@@ -402,13 +404,20 @@ export async function diffSessions(
 			diff.localOnly.push(info);
 			continue;
 		}
-		const a = await readFile(join(bucketDir, info.file)).catch(() =>
-			Buffer.alloc(0),
+		// Compare AFTER normalizing the local header to its staged form —
+		// the cwd field differs by design (abs path vs label); raw-byte
+		// compare would flag every pushed session as a collision forever.
+		const a = await readFile(join(bucketDir, info.file), "utf8").catch(() => "");
+		const b = await readFile(join(stagedDir, remote.file), "utf8").catch(
+			() => "\u0000",
 		);
-		const b = await readFile(join(stagedDir, remote.file)).catch(() =>
-			Buffer.alloc(1),
-		);
-		if (!a.equals(b)) {
+		let differs = true;
+		try {
+			differs = rewriteSessionHeader(a, label) !== b;
+		} catch {
+			differs = true; // malformed header — treat as differing, never crash the diff
+		}
+		if (differs) {
 			// ponytail: content compare after id match; mtime proxy decides conflicts (see command flow).
 			diff.collisions.push(info);
 		}
