@@ -1,11 +1,15 @@
-// pi-port.ts — export/import pi agent configuration.
+// pi-port.ts — export/import pi agent configuration + cloud sync.
 //
-// Two commands:
-//   /export-pi [path]   package ~/.pi/agent/ sections into a .pi-backup archive
-//   /import-pi [path]   restore a .pi-backup (selectively, with path remap)
+// Five commands:
+//   /pi-port-local-export [path]     package ~/.pi/agent/ sections into a .pi-backup archive
+//   /pi-port-local-import [path]     restore a .pi-backup (selectively, with path remap)
+//   /pi-port-setup                   one-time-per-machine backend config via vsync
+//   /pi-port-sync-conf               bidirectional sync of the global conf set (diff-first)
+//   /pi-port-sync-sessions           per-project session sync (diff-first, push/pull)
 //
-// Zero runtime deps beyond Node stdlib + the system `tar` binary.
-// macOS/Linux supported in v0.1; Windows native tar fallback is v0.2.
+// Local archives use the system `tar` binary (macOS/Linux in v0.1). Cloud
+// sync drives the user's own global `vsync` CLI (vasari-sync) — never
+// bundled, never interactive; pi's TUI collects everything first.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { homedir, hostname, userInfo, platform } from "node:os";
@@ -22,6 +26,42 @@ import {
 	extractManifest,
 	extractSections,
 } from "../lib/archive.ts";
+import {
+	BINDINGS_FILENAME,
+	sessionBucket,
+	stagingConfig,
+	stagingRoot,
+	stagingSessions,
+} from "../lib/paths.ts";
+import {
+	bindLabel,
+	labelForPath,
+	loadBindings,
+	saveBindings,
+	validateLabel,
+} from "../lib/bindings.ts";
+import {
+	addPaths,
+	defaultRunner,
+	ensureProject,
+	ghLogin,
+	ghRepos,
+	meetsFloor,
+	vsyncVersion,
+	VSYNC_MIN_VERSION,
+	type StatusJson,
+	type TransferJson,
+	type VsyncError,
+} from "../lib/vsync.ts";
+import {
+	applyConf,
+	diffConf,
+	diffSessions,
+	stageConf,
+	stageSession,
+	restoreSession,
+	type StageGate,
+} from "../lib/stage.ts";
 
 const STATE_FILE = join(homedir(), ".pi", "agent", "pi-port-state.json");
 
@@ -64,9 +104,110 @@ function formatBytes(n: number): string {
 	return `${(n / (1024 * 1024)).toFixed(1)}M`;
 }
 
+// ─────────────────────────────────────────────────── vsync backend fields
+// Mirrors vasari-sync's BACKEND_FIELDS table (config command): the prompts
+// here shape what `vsync config --set k=v` receives. Secrets travel only
+// as VSYNC_SECRET_<FIELD> env vars — pi-port never persists them.
+
+interface BackendField {
+	name: string;
+	label: string;
+	required?: boolean;
+	secret?: boolean;
+	kind?: "text" | "boolean" | "number";
+}
+
+const BACKENDS: Record<string, BackendField[]> = {
+	"local-fs": [
+		{ name: "basePath", label: "Storage directory path", required: true },
+	],
+	s3: [
+		{ name: "region", label: "Region", required: true },
+		{ name: "bucket", label: "Bucket", required: true },
+		{ name: "endpoint", label: "Custom endpoint (blank for AWS)" },
+		{
+			name: "forcePathStyle",
+			label: "Use path-style addressing",
+			kind: "boolean",
+		},
+		{ name: "accessKeyId", label: "Access key ID", required: true, secret: true },
+		{
+			name: "secretAccessKey",
+			label: "Secret access key",
+			required: true,
+			secret: true,
+		},
+	],
+	sftp: [
+		{ name: "host", label: "Host", required: true },
+		{ name: "port", label: "Port (blank for 22)", kind: "number" },
+		{ name: "username", label: "Username", required: true },
+		{ name: "password", label: "Password", secret: true },
+		{
+			name: "privateKeyPath",
+			label: "Private key path (optional, instead of password)",
+		},
+		{ name: "remoteBasePath", label: "Remote base path", required: true },
+	],
+	webdav: [
+		{ name: "url", label: "WebDAV URL", required: true },
+		{ name: "username", label: "Username" },
+		{ name: "password", label: "Password", secret: true },
+		{ name: "remoteBasePath", label: "Remote base path", required: true },
+	],
+	"github-repo": [
+		{ name: "owner", label: "Storage repo owner (user or org)", required: true },
+		{
+			name: "repo",
+			label: "Storage repo (private repo vsync commits your files into)",
+			required: true,
+		},
+		{ name: "branch", label: "Branch (blank for repo default)" },
+		{
+			name: "token",
+			label: "Personal access token (blank = reuse gh CLI login)",
+			secret: true,
+		},
+		{ name: "remoteBasePath", label: "Directory inside the storage repo" },
+	],
+};
+
+/** camelCase → CONSTANT_CASE env suffix (accessKeyId → ACCESS_KEY_ID). Same rule as vsync. */
+function toEnvVarName(field: string): string {
+	return field.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+}
+
+/** Common guard for the cloud commands. Returns true when safe to continue. */
+async function requireVsync(ctx: {
+	mode?: string;
+	ui: { notify(m: string, t?: "info" | "warning" | "error"): void };
+}): Promise<boolean> {
+	if (ctx.mode !== "tui") {
+		ctx.ui.notify("pi-port needs interactive mode", "error");
+		return false;
+	}
+	const version = await vsyncVersion();
+	if (!version) {
+		ctx.ui.notify(
+			"vsync not found on PATH — install it with `npm install -g vasari-sync`, then retry.",
+			"error",
+		);
+		return false;
+	}
+	if (!meetsFloor(version)) {
+		ctx.ui.notify(
+			`vsync ${version} is too old — pi-port needs ≥${VSYNC_MIN_VERSION} for --config isolation. ` +
+				"Upgrade: npm install -g vasari-sync@latest",
+			"error",
+		);
+		return false;
+	}
+	return true;
+}
+
 export default function piPort(pi: ExtensionAPI): void {
-	// ---------------------------------------------------------------- /export-pi
-	pi.registerCommand("export-pi", {
+	// ------------------------------------------------ /pi-port-local-export
+	pi.registerCommand("pi-port-local-export", {
 		description: "Export pi agent configuration to a .pi-backup archive",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
@@ -168,8 +309,8 @@ export default function piPort(pi: ExtensionAPI): void {
 		},
 	});
 
-	// ---------------------------------------------------------------- /import-pi
-	pi.registerCommand("import-pi", {
+	// ------------------------------------------------ /pi-port-local-import
+	pi.registerCommand("pi-port-local-import", {
 		description: "Import pi agent configuration from a .pi-backup archive",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
@@ -275,6 +416,397 @@ export default function piPort(pi: ExtensionAPI): void {
 			} catch (e) {
 				ctx.ui.setStatus("pi-port", undefined);
 				ctx.ui.notify(`Import failed: ${(e as Error).message}`, "error");
+			}
+		},
+	});
+
+	// ------------------------------------------------------- /pi-port-setup
+	pi.registerCommand("pi-port-setup", {
+		description: "One-time-per-machine backend config for cloud sync (via vsync)",
+		handler: async (_args, ctx) => {
+			if (!(await requireVsync(ctx))) return;
+
+			// 1. Pick a backend.
+			const backend = await ctx.ui.select(
+				"Which storage backend for pi-port cloud sync?",
+				Object.keys(BACKENDS),
+			);
+			if (!backend) {
+				ctx.ui.notify("Setup cancelled", "info");
+				return;
+			}
+
+			// 1.5 gh CLI prefill (github-repo): an authenticated `gh` offers
+			// the owner via confirm (pi inputs have no submit-default — the 2nd
+			// arg is a placeholder) and vsync auto-reuses its token when blank.
+			const gh = backend === "github-repo" ? await ghLogin() : null;
+			if (gh)
+				ctx.ui.notify(
+					`GitHub CLI detected — signed in as ${gh}; owner/token can be accepted with one keypress`,
+					"info",
+				);
+
+			// 2. Non-secret fields. Required ones re-ask until non-empty.
+			// github-repo's repo field becomes a picker of the gh login's actual
+			// repos when gh is authenticated (manual entry always available).
+			const setArgs: string[] = [];
+			for (const field of BACKENDS[backend]) {
+				if (field.secret) continue;
+				if (field.kind === "boolean") {
+					const on = await ctx.ui.confirm(field.label, "Set this flag?");
+					setArgs.push(`--set`, `${field.name}=${on ? "true" : "false"}`);
+					continue;
+				}
+				if (backend === "github-repo" && field.name === "repo" && gh) {
+					const repos = await ghRepos();
+					if (repos && repos.length > 0) {
+						const MANUAL = "Type a name/URL manually…";
+						const choice = await ctx.ui.select(field.label, [
+							...repos.map((r) => `${r.name}${r.isPrivate ? " (private)" : ""}`),
+							MANUAL,
+						]);
+						if (choice === undefined) {
+							ctx.ui.notify("Setup cancelled", "info");
+							return;
+						}
+						if (choice !== MANUAL) {
+							setArgs.push(
+								`--set`,
+								`${field.name}=${choice.replace(/ \(private\)$/, "")}`,
+							);
+							continue;
+						}
+					}
+				}
+				if (backend === "github-repo" && field.name === "owner" && gh) {
+					const use = await ctx.ui.confirm(
+						`Repo owner: ${gh} (from your gh CLI login)`,
+						"Use this owner?",
+					);
+					if (use === undefined) {
+						ctx.ui.notify("Setup cancelled", "info");
+						return;
+					}
+					if (use) {
+						setArgs.push(`--set`, `${field.name}=${gh}`);
+						continue;
+					}
+				}
+				let value: string | undefined;
+				while (true) {
+					value = await ctx.ui.input(
+						`${field.label}${field.required ? "" : " (optional)"}`,
+					);
+					if (value === undefined) {
+						ctx.ui.notify("Setup cancelled", "info");
+						return;
+					}
+					if (value.trim() || !field.required) break;
+					ctx.ui.notify(`${field.label} is required`, "warning");
+				}
+				if (value.trim()) setArgs.push(`--set`, `${field.name}=${value.trim()}`);
+			}
+
+			// 3. Secrets: typed once, passed as env vars only — never persisted
+			//    by pi-port. A blank github-repo token means vsync reuses the
+			//    `gh` CLI login (or a previously saved secret).
+			const env: Record<string, string> = {};
+			for (const field of BACKENDS[backend]) {
+				if (!field.secret) continue;
+				const value = await ctx.ui.input(
+					`${field.label}${field.name === "token" ? ` (blank = reuse gh CLI login${gh ? `: ${gh}` : ""})` : ""}`,
+				);
+				if (value === undefined) {
+					ctx.ui.notify("Setup cancelled", "info");
+					return;
+				}
+				if (value.trim())
+					env[`VSYNC_SECRET_${toEnvVarName(field.name)}`] = value.trim();
+			}
+
+			// 4. Let vsync test the connection and save the profile. A failed
+			//    test aborts on vsync's side — nothing is saved.
+			ctx.ui.setStatus("pi-port", "testing connection…");
+			try {
+				await defaultRunner(
+					["config", "--backend", backend, ...setArgs, "--json"],
+					{ env },
+				);
+				ctx.ui.setStatus("pi-port", undefined);
+				ctx.ui.notify(`Connection OK, profile saved (${backend})`, "info");
+			} catch (e) {
+				ctx.ui.setStatus("pi-port", undefined);
+				ctx.ui.notify(`Setup failed: ${(e as Error).message}`, "error");
+			}
+		},
+	});
+
+	// --------------------------------------------------- /pi-port-sync-conf
+	pi.registerCommand("pi-port-sync-conf", {
+		description:
+			"Bidirectional cloud sync of global pi config (settings, skills, prompts, themes…)",
+		handler: async (_args, ctx) => {
+			if (!(await requireVsync(ctx))) return;
+			const ad = agentDir();
+			const root = stagingRoot(ad);
+			const config = stagingConfig(ad);
+
+			// 1. Ensure the vsync project exists (silent when already done).
+			ctx.ui.setStatus("pi-port", "checking sync state…");
+			try {
+				await ensureProject(root);
+				const status = (await defaultRunner(["status", "--json"])) as StatusJson;
+				const local = await diffConf(ad, config);
+				ctx.ui.setStatus("pi-port", undefined);
+
+				// 2. Both sides identical → done.
+				const remoteDrift = status.files.filter((f) => f.status !== "unchanged");
+				if (
+					local.agentOnly.length === 0 &&
+					local.stagingOnly.length === 0 &&
+					local.differs.length === 0 &&
+					remoteDrift.length === 0
+				) {
+					ctx.ui.notify("Conf in sync", "info");
+					return;
+				}
+
+				// 3. File-level summary, then direction.
+				const lines: string[] = [];
+				for (const rel of local.differs)
+					lines.push(`  ${rel} — differs from last synced`);
+				for (const rel of local.agentOnly) lines.push(`  ${rel} — new locally`);
+				for (const rel of local.stagingOnly) lines.push(`  ${rel} — remote only`);
+				for (const f of remoteDrift) {
+					if (local.stagingOnly.some((rel) => `config/${rel}` === f.path)) continue; // already shown
+					if (f.status === "remote-missing")
+						lines.push(`  ${f.path} — not pushed yet`);
+					else lines.push(`  ${f.path} — staged ≠ remote (${f.status})`);
+				}
+				const choice = await ctx.ui.select(
+					`Conf differences:\n${lines.join("\n")}\n\nDirection?`,
+					["Push (local → cloud)", "Pull (cloud → local)", "Cancel"],
+				);
+				if (!choice || choice === "Cancel") {
+					ctx.ui.notify("Conf sync cancelled", "info");
+					return;
+				}
+
+				if (choice.startsWith("Pull")) {
+					// 4a. Refresh staging from the backend, then apply → ~/.pi/agent.
+					ctx.ui.setStatus("pi-port", "pulling…");
+					await defaultRunner(["pull", "--json"]);
+					ctx.ui.setStatus("pi-port", "applying…");
+					const applied = await applyConf(ad, config, homedir());
+					ctx.ui.setStatus("pi-port", undefined);
+					ctx.ui.notify(
+						`Pulled ${applied.applied.length} file(s)` +
+							(applied.packagesChanged ? " — packages changed, reload pi" : ""),
+						"info",
+					);
+					return;
+				}
+
+				// 4b. Stage local → staging config/, scan for secrets, add, push.
+				ctx.ui.setStatus("pi-port", "staging…");
+				const gate: StageGate = async (rel, hits) =>
+					ctx.ui.confirm(
+						`Push ${rel} anyway?`,
+						`⚠️ Secret scan: ${hits.join(", ")} (values not shown)`,
+					);
+				const staged = await stageConf(ad, config, gate);
+				await addPaths(
+					root,
+					staged.staged.map((rel) => `config/${rel}`),
+				);
+				ctx.ui.setStatus("pi-port", "pushing…");
+				try {
+					const push = (await defaultRunner(["push", "--json"])) as TransferJson;
+					ctx.ui.setStatus("pi-port", undefined);
+					ctx.ui.notify(
+						`Pushed ${push.summary.pushed ?? 0}, skipped ${push.summary["skipped-unchanged"] ?? 0}` +
+							(staged.skipped.length > 0
+								? `, ${staged.skipped.length} blocked by secret scan`
+								: ""),
+						"info",
+					);
+				} catch (e) {
+					ctx.ui.setStatus("pi-port", undefined);
+					const partial = (e as VsyncError).json as TransferJson | undefined;
+					ctx.ui.notify(
+						`Push incomplete: ${(e as Error).message}` +
+							(partial ? ` (pushed ${partial.summary.pushed ?? 0})` : ""),
+						"error",
+					);
+				}
+			} catch (e) {
+				ctx.ui.setStatus("pi-port", undefined);
+				ctx.ui.notify(`Conf sync failed: ${(e as Error).message}`, "error");
+			}
+		},
+	});
+
+	// ----------------------------------------------- /pi-port-sync-sessions
+	pi.registerCommand("pi-port-sync-sessions", {
+		description:
+			"Cloud sync of this project's pi sessions (push/pull, diff-first)",
+		handler: async (_args, ctx) => {
+			if (!(await requireVsync(ctx))) return;
+			const ad = agentDir();
+
+			// 1. Resolve this project's label from the local bindings.
+			const bindingsPath = join(ad, BINDINGS_FILENAME);
+			const bindings = await loadBindings(bindingsPath);
+			let label = labelForPath(bindings, ctx.cwd);
+			while (!label) {
+				const input = await ctx.ui.input(
+					"Project label (your chosen identity for this directory across machines):",
+					basename(ctx.cwd),
+				);
+				if (!input) {
+					ctx.ui.notify("Session sync cancelled", "info");
+					return;
+				}
+				const t = input.trim();
+				const problem = validateLabel(t) ?? bindLabel(bindings, t, ctx.cwd);
+				if (problem) {
+					ctx.ui.notify(problem, "warning");
+					continue;
+				}
+				label = t;
+				await saveBindings(bindingsPath, bindings);
+			}
+
+			const root = stagingRoot(ad);
+			const stagedDir = stagingSessions(ad, label);
+			const bucket = sessionBucket(ad, ctx.cwd);
+
+			try {
+				// 2. Ensure project, then pull FIRST — the mirror-semantics guard
+				//    (a later push must never delete remote-only sessions).
+				ctx.ui.setStatus("pi-port", "syncing staging…");
+				await ensureProject(root);
+				await defaultRunner(["pull", "--json"]);
+
+				// 3. Diff by session id.
+				const diff = await diffSessions(bucket, stagedDir);
+				ctx.ui.setStatus("pi-port", undefined);
+				if (
+					diff.localOnly.length === 0 &&
+					diff.stagedOnly.length === 0 &&
+					diff.collisions.length === 0
+				) {
+					ctx.ui.notify(`Sessions in sync for '${label}'`, "info");
+					return;
+				}
+
+				// 4. Counts + newest timestamps per side, then direction.
+				const newest = (ts: (string | undefined)[]): string =>
+					ts.filter(Boolean).sort().at(-1) ?? "unknown";
+				const summary =
+					`Local ahead: ${diff.localOnly.length} (newest ${newest(diff.localOnly.map((s) => s.timestamp))})\n` +
+					`Remote ahead: ${diff.stagedOnly.length} (newest ${newest(diff.stagedOnly.map((s) => s.timestamp))})\n` +
+					`Same id, different content: ${diff.collisions.length}`;
+				const options = ["Push (local → cloud)", "Pull (cloud → local)"];
+				if (diff.collisions.length === 0) options.push("Both");
+				options.push("Cancel");
+				const choice = await ctx.ui.select(
+					`Sessions for '${label}' (${ctx.cwd}):\n${summary}\n\nDirection?`,
+					options,
+				);
+				if (!choice || choice === "Cancel") {
+					ctx.ui.notify("Session sync cancelled", "info");
+					return;
+				}
+
+				const gate: StageGate = async (file, hits) =>
+					ctx.ui.confirm(
+						`Push ${basename(file)} anyway?`,
+						`⚠️ Secret scan: ${hits.join(", ")} (values not shown)`,
+					);
+
+				if (choice.startsWith("Push") || choice === "Both") {
+					// 5. Stage local-new + locally-newer collisions → push.
+					ctx.ui.setStatus("pi-port", "staging sessions…");
+					const rels: string[] = [];
+					let stale = 0;
+					let blocked = 0;
+					const stageOne = async (file: string): Promise<void> => {
+						const ok = await stageSession(
+							join(bucket, file),
+							join(stagedDir, file),
+							label,
+							gate,
+						);
+						if (ok) rels.push(`projects/${label}/sessions/${file}`);
+						else blocked++;
+					};
+					for (const info of diff.localOnly) await stageOne(info.file);
+					for (const info of diff.collisions) {
+						// ponytail: last-edited-wins via local mtime vs staged-file mtime
+						// (proxy for the remote push time — vsync status --json has no
+						// pushedAt; wall-clock skew between machines can misjudge).
+						const stagedMtime = await stat(join(stagedDir, info.file))
+							.then((s) => s.mtimeMs)
+							.catch(() => 0);
+						if (info.mtimeMs > stagedMtime) await stageOne(info.file);
+						else stale++;
+					}
+					await addPaths(root, rels);
+					ctx.ui.setStatus("pi-port", "pushing…");
+					const push = (await defaultRunner(["push", "--json"])) as TransferJson;
+					ctx.ui.setStatus("pi-port", undefined);
+					ctx.ui.notify(
+						`Pushed ${push.summary.pushed ?? 0} session(s)` +
+							(stale > 0 ? `, ${stale} kept (remote newer)` : "") +
+							(blocked > 0 ? `, ${blocked} blocked by secret scan` : ""),
+						"info",
+					);
+				}
+
+				if (choice.startsWith("Pull") || choice === "Both") {
+					// 6. Restore staged-only + collisions → local bucket (idempotent).
+					// Collisions respect last-edited-wins: local is kept when it is newer.
+					ctx.ui.setStatus("pi-port", "restoring sessions…");
+					let written = 0;
+					let skipped = 0;
+					let keptLocal = 0;
+					for (const info of diff.stagedOnly) {
+						const out = await restoreSession(
+							join(stagedDir, info.file),
+							bucket,
+							ctx.cwd,
+						);
+						out === "written" ? written++ : skipped++;
+					}
+					for (const info of diff.collisions) {
+						// ponytail: mirror of the push-side mtime comparison; staged-file
+						// mtime proxies the remote push time (no pushedAt in status --json).
+						const stagedMtime = await stat(join(stagedDir, info.file))
+							.then((s) => s.mtimeMs)
+							.catch(() => Infinity);
+						if (stagedMtime > info.mtimeMs) {
+							const out = await restoreSession(
+								join(stagedDir, info.file),
+								bucket,
+								ctx.cwd,
+							);
+							out === "written" ? written++ : skipped++;
+						} else {
+							keptLocal++;
+						}
+					}
+					ctx.ui.setStatus("pi-port", undefined);
+					ctx.ui.notify(
+						`Restored ${written} session(s)` +
+							(skipped > 0 ? `, ${skipped} already current` : "") +
+							(keptLocal > 0 ? `, ${keptLocal} kept local (local newer)` : ""),
+						"info",
+					);
+				}
+			} catch (e) {
+				ctx.ui.setStatus("pi-port", undefined);
+				ctx.ui.notify(`Session sync failed: ${(e as Error).message}`, "error");
 			}
 		},
 	});

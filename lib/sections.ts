@@ -13,7 +13,10 @@ export type SectionId =
 	| "bin"
 	| "memory"
 	| "projects-memory"
-	| "sessions";
+	| "sessions"
+	| "keybindings"
+	| "prompts"
+	| "themes";
 
 export interface SectionDef {
 	id: SectionId;
@@ -99,6 +102,27 @@ export const SECTIONS: readonly SectionDef[] = [
 		kind: "dir",
 		defaultExport: false,
 		note: "large; only if you want history",
+	},
+	{
+		id: "keybindings",
+		label: "Keybindings",
+		path: "keybindings.json",
+		kind: "file",
+		defaultExport: true,
+	},
+	{
+		id: "prompts",
+		label: "Prompts",
+		path: "prompts",
+		kind: "dir",
+		defaultExport: true,
+	},
+	{
+		id: "themes",
+		label: "Themes",
+		path: "themes",
+		kind: "dir",
+		defaultExport: true,
 	},
 ];
 

@@ -30,21 +30,12 @@ export function remapPath(
 	const pNorm = p.replace(/\\/g, "/");
 	if (pNorm === src || pNorm.startsWith(src + "/")) {
 		const tail = pNorm.slice(src.length); // includes leading "/" or is ""
-		return targetHome + tail.replace(/\//g, sep());
+		// Follow the target's own separator style — a posix target must never
+		// receive backslashes just because the host is Windows (or vice versa).
+		const sepStyle = targetHome.includes("\\") ? "\\" : "/";
+		return targetHome + tail.replace(/\//g, sepStyle);
 	}
 	return p;
-}
-
-/** Node's platform separator, lazily imported to keep this module test-pure. */
-function sep(): string {
-	// At test time we may not have node:path imported; default to POSIX.
-	// The runtime import path goes through archive.ts which runs on the host.
-	try {
-		// eslint-disable-next-line @typescript-eslint/no-require-imports
-		return require("node:path").sep;
-	} catch {
-		return "/";
-	}
 }
 
 /**
@@ -64,9 +55,7 @@ export function remapObject<T>(
 	if (typeof obj === "string")
 		return remapPath(obj, sourceHome, targetHome) as unknown as T;
 	if (Array.isArray(obj))
-		return obj.map((x) =>
-			remapObject(x, sourceHome, targetHome),
-		) as unknown as T;
+		return obj.map((x) => remapObject(x, sourceHome, targetHome)) as unknown as T;
 	if (obj && typeof obj === "object") {
 		const out: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {

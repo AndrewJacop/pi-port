@@ -1,7 +1,7 @@
 {
   "name": "@andrewjacop/pi-port",
-  "version": "0.1.0",
-  "description": "Export and import pi agent configuration between machines",
+  "version": "0.2.0",
+  "description": "Export, import, and cloud-sync your pi agent configuration and sessions between machines",
   "keywords": [
     "pi-package"
   ],
@@ -17,7 +17,7 @@
     "access": "public"
   },
   "scripts": {
-    "test": "node --test --import tsx 'test/**/*.test.ts'"
+    "test": "node --test --import tsx \"test/**/*.test.ts\""
   },
   "pi": {
     "extensions": [
