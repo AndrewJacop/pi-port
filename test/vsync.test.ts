@@ -18,14 +18,14 @@ async function tmp(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "pi-port-vsync-"));
 }
 
-test("meetsFloor: 0.6.0 is the --config floor", () => {
-	assert.equal(meetsFloor("0.6.0"), true);
+test("meetsFloor: 0.6.1 is the floor (--config + stdin file lists)", () => {
 	assert.equal(meetsFloor("0.6.1"), true);
+	assert.equal(meetsFloor("0.6.2"), true);
 	assert.equal(meetsFloor("0.7.0"), true);
 	assert.equal(meetsFloor("1.0.0"), true);
-	assert.equal(meetsFloor("0.6"), true); // missing patch counts as .0
+	assert.equal(meetsFloor("0.6"), false); // missing patch counts as .0
+	assert.equal(meetsFloor("0.6.0"), false);
 	assert.equal(meetsFloor("0.5.9"), false);
-	assert.equal(meetsFloor("0.5.0"), false);
 	assert.equal(meetsFloor(null), false);
 	assert.equal(meetsFloor(undefined), false);
 });
@@ -67,15 +67,15 @@ test("ensureProject: manifest missing, link succeeds → linked", async () => {
 
 test("ensureProject: link fails → init with enumerated staged files", async () => {
 	const t = await tmp();
-	// Pre-staged content (machine A) must be enumerated into --files.
+	// Pre-staged content (machine A) must be piped into `init --files -`.
 	await mkdir(join(t, "config", "skills"), { recursive: true });
 	await writeFile(join(t, "config", "settings.json"), "{}");
 	await writeFile(join(t, "config", "skills", "SKILL.md"), "x");
 	await mkdir(join(t, ".vsync"), { recursive: true });
 	await writeFile(join(t, ".vsync", "manifest.json"), "STALE-IGNORED"); // still "missing" per readTrackedPaths? no — it exists…
-	const seen: string[][] = [];
-	const run: VsyncRunner = async (args) => {
-		seen.push(args);
+	const seen: Array<{ args: string[]; input?: string }> = [];
+	const run: VsyncRunner = async (args, opts) => {
+		seen.push({ args, input: opts?.input });
 		if (args[0] === "link")
 			throw new Error("no files found for project 'pi-port'");
 		return {};
@@ -85,15 +85,18 @@ test("ensureProject: link fails → init with enumerated staged files", async ()
 	await rm(join(t, ".vsync", "manifest.json"));
 	assert.equal(await ensureProject(t, run), "initialized");
 	assert.equal(seen.length, 2);
-	assert.equal(seen[0][0], "link");
-	assert.deepEqual(seen[1], [
-		"init",
-		"--project-id",
-		"pi-port",
-		"--json",
-		"--files",
-		"config/settings.json,config/skills/SKILL.md",
-	]);
+	assert.equal(seen[0].args[0], "link");
+	assert.deepEqual(seen[1], {
+		args: [
+			"init",
+			"--project-id",
+			"pi-port",
+			"--json",
+			"--files",
+			"-",
+		],
+		input: "config/settings.json\nconfig/skills/SKILL.md\n",
+	});
 });
 
 test("ensureProject: link AND init fail → error carries the setup hint", async () => {
@@ -110,16 +113,16 @@ test("ensureProject: link AND init fail → error carries the setup hint", async
 	);
 });
 
-test("addPaths: only untracked paths reach vsync add", async () => {
+test("addPaths: only untracked paths reach vsync add (via stdin)", async () => {
 	const t = await tmp();
 	await mkdir(join(t, ".vsync"), { recursive: true });
 	await writeFile(
 		join(t, ".vsync", "manifest.json"),
 		'{"files":[{"path":"config/settings.json"}]}',
 	);
-	const seen: string[][] = [];
-	const run: VsyncRunner = async (args) => {
-		seen.push(args);
+	const seen: Array<{ args: string[]; input?: string }> = [];
+	const run: VsyncRunner = async (args, opts) => {
+		seen.push({ args, input: opts?.input });
 		return { added: [] };
 	};
 	const added = await addPaths(
@@ -128,7 +131,9 @@ test("addPaths: only untracked paths reach vsync add", async () => {
 		run,
 	);
 	assert.deepEqual(added, ["config/trust.json"]);
-	assert.deepEqual(seen, [["add", "config/trust.json", "--json"]]);
+	assert.deepEqual(seen, [
+		{ args: ["add", "-", "--json"], input: "config/trust.json\n" },
+	]);
 });
 
 test("addPaths: nothing new → no vsync call", async () => {

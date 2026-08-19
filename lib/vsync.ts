@@ -16,10 +16,13 @@ import {
 	VSYNC_PROJECT_ID,
 } from "./paths.ts";
 
-/** Run vsync, resolve with the parsed stdout JSON (undefined when non-JSON). */
+/** Run vsync, resolve with the parsed stdout JSON (undefined when non-JSON).
+ * `opts.input` is piped to vsync's stdin — how large file lists travel
+ * (`add -` / `init --files -`): argv stays a fixed size, immune to the
+ * OS command-line length caps (cmd.exe ~8k chars). */
 export type VsyncRunner = (
 	args: string[],
-	opts?: { env?: Record<string, string> },
+	opts?: { env?: Record<string, string>; input?: string },
 ) => Promise<unknown>;
 
 export class VsyncError extends Error {
@@ -60,6 +63,7 @@ async function spawnVsync(
 	args: string[],
 	cwd: string,
 	env?: Record<string, string>,
+	input?: string,
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
 	// First-ever run: the staging tree (spawn cwd) may not exist yet —
 	// cmd.exe ENOENTs on a missing cwd before vsync even starts.
@@ -70,23 +74,25 @@ async function spawnVsync(
 		// projects. Appending works in either position (global flag), and the
 		// flag beats ambient VSYNC_CONFIG/VSYNC_HOME inside the child.
 		const withConfig = [...args, "--config", vsyncConfigPath(defaultAgentDir())];
-		const win = process.platform === "win32";
-		const child = win
-			? spawn("vsync", withConfig.map(winQuote), {
-					cwd,
-					shell: true,
-					stdio: ["ignore", "pipe", "pipe"],
-					env: env ? { ...process.env, ...env } : process.env,
-				})
-			: spawn("vsync", withConfig, {
-					cwd,
-					stdio: ["ignore", "pipe", "pipe"],
-					env: env ? { ...process.env, ...env } : process.env,
-				});
+		const stdio: Array<"pipe" | "ignore"> = [input === undefined ? "ignore" : "pipe", "pipe", "pipe"];
+		const spawnOpts = {
+			cwd,
+			...(process.platform === "win32" ? { shell: true as const } : {}),
+			stdio,
+			env: env ? { ...process.env, ...env } : process.env,
+		};
+		const child =
+			process.platform === "win32"
+					? spawn("vsync", withConfig.map(winQuote), spawnOpts)
+					: spawn("vsync", withConfig, spawnOpts);
+		if (input !== undefined) {
+			child.stdin?.end(input); // EPIPE (child exits early) is fine on "close"
+			child.stdin?.on("error", () => undefined);
+		}
 		let stdout = "";
 		let stderr = "";
-		child.stdout.on("data", (d) => (stdout += d));
-		child.stderr.on("data", (d) => (stderr += d));
+		child.stdout!.on("data", (d) => (stdout += d));
+		child.stderr!.on("data", (d) => (stderr += d));
 		child.on("error", reject);
 		child.on("close", (code) => resolve({ stdout, stderr, code }));
 	});
@@ -98,6 +104,7 @@ export const defaultRunner: VsyncRunner = async (args, opts) => {
 		args,
 		stagingRoot(join(homedir(), ".pi", "agent")),
 		opts?.env,
+		opts?.input,
 	);
 	if (code === 0) {
 		try {
@@ -119,8 +126,8 @@ export const defaultRunner: VsyncRunner = async (args, opts) => {
 	throw err;
 };
 
-/** Minimum vsync version: `--config` (multi-profile isolation) landed in 0.6.0. */
-export const VSYNC_MIN_VERSION = "0.6.0";
+/** Minimum vsync version: `--config` landed in 0.6.0, stdin `-` file lists in 0.6.1. */
+export const VSYNC_MIN_VERSION = "0.6.1";
 
 /** Parse "1.2.3" from `vsync --version`; null when the CLI is not on PATH. */
 export async function vsyncVersion(): Promise<string | null> {
@@ -244,9 +251,11 @@ export async function ensureProject(
 		// Nothing on the backend (or no backend yet) — this is machine A.
 		const files = await listFiles(root, [".vsync", ".gitignore"]);
 		const args = ["init", "--project-id", VSYNC_PROJECT_ID, "--json"];
-		if (files.length > 0) args.push("--files", files.join(","));
+		// Large trees overflow the OS command-line caps — the file list is
+		// piped (init --files - reads newline-separated paths from stdin).
+		if (files.length > 0) args.push("--files", "-");
 		try {
-			await run(args);
+			await run(args, files.length > 0 ? { input: `${files.join("\n")}\n` } : undefined);
 			return "initialized";
 		} catch (e) {
 			throw new VsyncError(
@@ -264,6 +273,9 @@ export async function addPaths(
 ): Promise<string[]> {
 	const tracked = (await readTrackedPaths(root)) ?? new Set<string>();
 	const fresh = relPaths.filter((p) => !tracked.has(p));
-	if (fresh.length > 0) await run(["add", ...fresh, "--json"]);
+	// Paths go over stdin (`add -`) — a 100+ path session list overflows the
+	// OS command-line length caps (cmd.exe ~8k chars) when passed as argv.
+	if (fresh.length > 0)
+		await run(["add", "-", "--json"], { input: `${fresh.join("\n")}\n` });
 	return fresh;
 }

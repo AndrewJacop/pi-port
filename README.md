@@ -17,7 +17,7 @@ pi install git:github.com/andrewjacop/pi-port
 
 All commands load automatically.
 
-**Cloud sync prerequisite:** [`vsync`](https://www.npmjs.com/package/vasari-sync) ≥ 0.6.0 on your PATH:
+**Cloud sync prerequisite:** [`vsync`](https://www.npmjs.com/package/vasari-sync) ≥ 0.6.1 on your PATH:
 
 ```bash
 npm install -g vasari-sync
