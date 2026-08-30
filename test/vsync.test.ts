@@ -151,3 +151,15 @@ test("addPaths: nothing new → no vsync call", async () => {
 	assert.deepEqual(await addPaths(t, ["a"], run), []);
 	assert.equal(calls, 0);
 });
+
+test("ensureProject: real link failure (not project-missing) → rethrown, no init", async () => {
+	const t = await tmp();
+	const seen: string[][] = [];
+	const run: VsyncRunner = async (args) => {
+		seen.push(args);
+		if (args[0] === "link") throw new Error("Unknown encoding: none");
+		return {};
+	};
+	await assert.rejects(ensureProject(t, run), /Unknown encoding: none/);
+	assert.equal(seen.length, 1); // init never attempted — the real error surfaces
+});

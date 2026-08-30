@@ -247,8 +247,12 @@ export async function ensureProject(
 	try {
 		await run(["link", VSYNC_PROJECT_ID, "--pull", "--json"]);
 		return "linked";
-	} catch {
-		// Nothing on the backend (or no backend yet) — this is machine A.
+	} catch (e) {
+		// Only machine-A states fall back to init: the backend has nothing
+		// under this project, or no profile is configured yet. Any other
+		// failure (auth, network, a bad pull…) must surface — swallowing it
+		// here masks the real error and leaves link's half-written manifest.
+		if (!/no files found|no saved profile/i.test((e as Error).message)) throw e;
 		const files = await listFiles(root, [".vsync", ".gitignore"]);
 		const args = ["init", "--project-id", VSYNC_PROJECT_ID, "--json"];
 		// Large trees overflow the OS command-line caps — the file list is

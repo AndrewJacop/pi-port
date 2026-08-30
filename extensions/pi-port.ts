@@ -32,6 +32,7 @@ import {
 	stagingConfig,
 	stagingRoot,
 	stagingSessions,
+	listFiles,
 } from "../lib/paths.ts";
 import {
 	bindLabel,
@@ -47,6 +48,7 @@ import {
 	ghLogin,
 	ghRepos,
 	meetsFloor,
+	readTrackedPaths,
 	vsyncVersion,
 	VSYNC_MIN_VERSION,
 	type StatusJson,
@@ -566,6 +568,13 @@ export default function piPort(pi: ExtensionAPI): void {
 				await ensureProject(root);
 				const status = (await defaultRunner(["status", "--json"])) as StatusJson;
 				const local = await diffConf(ad, config);
+				// Staged-but-untracked conf files are invisible to `status` (it
+				// reports only on manifest entries) — a run that died between
+				// staging and `add` would otherwise read as "in sync" forever.
+				const tracked = (await readTrackedPaths(root)) ?? new Set<string>();
+				const untracked = (await listFiles(config)).filter(
+					(rel) => !tracked.has(`config/${rel}`),
+				);
 				ctx.ui.setStatus("pi-port", undefined);
 
 				// 2. Both sides identical → done.
@@ -574,7 +583,8 @@ export default function piPort(pi: ExtensionAPI): void {
 					local.agentOnly.length === 0 &&
 					local.stagingOnly.length === 0 &&
 					local.differs.length === 0 &&
-					remoteDrift.length === 0
+					remoteDrift.length === 0 &&
+					untracked.length === 0
 				) {
 					ctx.ui.notify("Conf in sync", "info");
 					return;
@@ -586,6 +596,7 @@ export default function piPort(pi: ExtensionAPI): void {
 					lines.push(`  ${rel} — differs from last synced`);
 				for (const rel of local.agentOnly) lines.push(`  ${rel} — new locally`);
 				for (const rel of local.stagingOnly) lines.push(`  ${rel} — remote only`);
+				for (const rel of untracked) lines.push(`  ${rel} — staged but never pushed`);
 				for (const f of remoteDrift) {
 					if (local.stagingOnly.some((rel) => `config/${rel}` === f.path)) continue; // already shown
 					if (f.status === "remote-missing")
