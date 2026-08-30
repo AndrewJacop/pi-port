@@ -17,7 +17,7 @@ pi install git:github.com/andrewjacop/pi-port
 
 All commands load automatically.
 
-**Cloud sync prerequisite:** [`vsync`](https://www.npmjs.com/package/vasari-sync) ≥ 0.6.1 on your PATH:
+**Cloud sync prerequisite:** [`vsync`](https://www.npmjs.com/package/vasari-sync) ≥ 0.6.3 on your PATH:
 
 ```bash
 npm install -g vasari-sync
@@ -59,7 +59,7 @@ One-time-per-machine backend configuration. Picks a backend (s3, sftp, webdav, g
 /pi-port-sync-conf
 ```
 
-Bidirectional sync of the global pi config: `settings.json`, `keybindings.json`, `trust.json`, `skills/`, `prompts/`, `themes/`. Diff-first — shows exactly what differs, then asks the direction:
+Bidirectional sync of the global pi config: `settings.json`, `keybindings.json`, `trust.json`, `skills/`, `prompts/`, `themes/`. Diff-first — shows exactly what differs (including files staged by an interrupted earlier run but never pushed), then asks the direction:
 
 - **Pull** — remote changes are applied with a `.preimport.bak` backup of everything overwritten; `settings.json` is *merged* over local (machine-local package paths are dropped), and paths are remapped between homes when they differ.
 - **Push** — local config is staged (`lastChangelogVersion` and machine-local package paths stripped), scanned for secrets, then uploaded.
@@ -154,7 +154,7 @@ The format is versioned. Importing a backup made by a newer Pi Port than you hav
 git clone https://github.com/andrewjacop/pi-port
 cd pi-port
 npm install
-npm test          # 55 unit tests (paths, staging, scan, vsync wrapper, remap)
+npm test          # 56 unit tests (paths, staging, scan, vsync wrapper, remap)
 npx tsc --noEmit  # typecheck
 ```
 
