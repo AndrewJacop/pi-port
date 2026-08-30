@@ -6,7 +6,7 @@
 // runner is injectable so tests can fake the CLI.
 
 import { spawn } from "node:child_process";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -234,16 +234,24 @@ export async function readTrackedPaths(
 }
 
 /**
- * Ensure the single `pi-port` vsync project exists in the staging tree.
- * Silent when the manifest is already there; otherwise machine B links
- * (pulling the remote state down) and a fresh machine initializes.
+ * Ensure the single `pi-port` vsync project exists in the staging tree —
+ * and refresh it from the backend. The manifest is derived state that
+ * never travels: `pull`/`status` iterate manifest entries only, so a
+ * clone goes stale the moment another machine pushes files it has never
+ * seen. Every run therefore re-links: link is vsync's rebuild-the-
+ * manifest-from-the-backend op, and with a manifest present it refuses
+ * ("would clobber") — so drop the stale one first. Local files are
+ * never touched; a push re-adds anything the index doesn't know yet.
  * `root` is the staging tree itself (vsync's project root).
  */
 export async function ensureProject(
 	root: string,
 	run: VsyncRunner = defaultRunner,
-): Promise<"ready" | "linked" | "initialized"> {
-	if ((await readTrackedPaths(root)) !== null) return "ready";
+): Promise<"linked" | "initialized"> {
+	const priorManifest = (await readTrackedPaths(root)) !== null;
+	if (priorManifest) {
+		await rm(join(root, ".vsync", "manifest.json"), { force: true });
+	}
 	try {
 		await run(["link", VSYNC_PROJECT_ID, "--pull", "--json"]);
 		return "linked";

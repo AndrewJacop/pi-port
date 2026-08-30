@@ -59,7 +59,7 @@ One-time-per-machine backend configuration. Picks a backend (s3, sftp, webdav, g
 /pi-port-sync-conf
 ```
 
-Bidirectional sync of the global pi config: `settings.json`, `keybindings.json`, `trust.json`, `skills/`, `prompts/`, `themes/`. Diff-first — shows exactly what differs (including files staged by an interrupted earlier run but never pushed), then asks the direction:
+Bidirectional sync of the global pi config: `settings.json`, `keybindings.json`, `trust.json`, `skills/`, `prompts/`, `themes/`. The staging manifest is re-derived from the backend on every run, so files another machine pushed after this machine last synced are seen. Diff-first — shows exactly what differs (including files staged by an interrupted earlier run but never pushed), then asks the direction:
 
 - **Pull** — remote changes are applied with a `.preimport.bak` backup of everything overwritten; `settings.json` is *merged* over local (machine-local package paths are dropped), and paths are remapped between homes when they differ.
 - **Push** — local config is staged (`lastChangelogVersion` and machine-local package paths stripped), scanned for secrets, then uploaded.

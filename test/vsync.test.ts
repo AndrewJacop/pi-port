@@ -3,7 +3,7 @@
 // Run with: npm test (-> node --test --import tsx test/)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -41,17 +41,31 @@ test("readTrackedPaths: null without manifest, set with one", async () => {
 	assert.deepEqual(await readTrackedPaths(t), new Set(["config/settings.json"]));
 });
 
-test("ensureProject: existing manifest → ready, runner never called", async () => {
+test("ensureProject: existing manifest → dropped and re-linked (refresh from backend)", async () => {
 	const t = await tmp();
 	await mkdir(join(t, ".vsync"), { recursive: true });
-	await writeFile(join(t, ".vsync", "manifest.json"), '{"files":[]}');
-	let calls = 0;
-	const run: VsyncRunner = async () => {
-		calls++;
+	// A stale clone manifest — pull/status only see its entries, so it must
+	// be re-derived from the backend every run, not trusted.
+	await writeFile(
+		join(t, ".vsync", "manifest.json"),
+		'{"projectId":"pi-port","backend":"s3","files":[{"path":"projects/old.jsonl"}]}',
+	);
+	const seen: string[][] = [];
+	const run: VsyncRunner = async (args) => {
+		seen.push(args);
+		// The real `vsync link` writes the rebuilt manifest; mimic that.
+		if (args[0] === "link")
+			await writeFile(
+				join(t, ".vsync", "manifest.json"),
+				'{"projectId":"pi-port","backend":"s3","files":[]}',
+			);
 		return {};
 	};
-	assert.equal(await ensureProject(t, run), "ready");
-	assert.equal(calls, 0);
+	assert.equal(await ensureProject(t, run), "linked");
+	assert.deepEqual(seen, [["link", "pi-port", "--pull", "--json"]]);
+	// The stale manifest is gone — link wrote the fresh one.
+	const raw = JSON.parse(await readFile(join(t, ".vsync", "manifest.json"), "utf8"));
+	assert.equal(raw.projectId, "pi-port");
 });
 
 test("ensureProject: manifest missing, link succeeds → linked", async () => {
