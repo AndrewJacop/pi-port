@@ -708,8 +708,16 @@ export default function piPort(pi: ExtensionAPI): void {
 				await ensureProject(root);
 				await defaultRunner(["pull", "--json"]);
 
-				// 3. Diff by session id (header-normalized: staged cwd = label).
-				const diff = await diffSessions(bucket, stagedDir, label);
+				// 3. Diff by session id (header-normalized: staged cwd = label),
+				//    gated by the vsync manifest = backend truth. Staging can hold
+				//    orphaned files from a failed/interrupted push — those must not
+				//    count as remote, or sessions silently never reach the cloud.
+				const diff = await diffSessions(
+					bucket,
+					stagedDir,
+					label,
+					(await readTrackedPaths(root)) ?? new Set<string>(),
+				);
 				ctx.ui.setStatus("pi-port", undefined);
 				if (
 					diff.localOnly.length === 0 &&
@@ -749,6 +757,7 @@ export default function piPort(pi: ExtensionAPI): void {
 						diff.stagedOnly.length,
 						diff.stagedOnly.map((s) => s.timestamp),
 					)}\n` +
+					`Already in sync: ${diff.inSync}\n` +
 					`Same id, different content: ${diff.collisions.length}${collisionNote}`;
 				const options = [
 					"Push (local → cloud)",
@@ -826,7 +835,8 @@ export default function piPort(pi: ExtensionAPI): void {
 							bucket,
 							ctx.cwd,
 						);
-						out === "written" ? written++ : skipped++;
+						if (out === "written") written++;
+						else skipped++;
 					}
 					for (const info of diff.collisions) {
 						// ponytail: mirror of the push-side mtime comparison; staged-file
@@ -840,7 +850,8 @@ export default function piPort(pi: ExtensionAPI): void {
 								bucket,
 								ctx.cwd,
 							);
-							out === "written" ? written++ : skipped++;
+							if (out === "written") written++;
+							else skipped++;
 						} else {
 							keptLocal++;
 						}

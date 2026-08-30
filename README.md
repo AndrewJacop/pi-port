@@ -72,7 +72,7 @@ Bidirectional sync of the global pi config: `settings.json`, `keybindings.json`,
 
 Syncs sessions **for the project pi is opened in**. Because pi stores sessions under machine-specific absolute paths, each project gets a short **label** you choose once per project (suggested from the folder name); the label — not the path — is what travels through the cloud. First run in a project asks for its label; every other machine just works.
 
-Sessions are diffed by session id, so nothing is duplicated and the usual flow is: work on machine A → push; sit down at machine B → pull → A's sessions appear in `/resume` immediately. A session changed on both machines (rare) resolves last-edited-wins.
+Sessions are diffed by session id, so nothing is duplicated and the usual flow is: work on machine A → push; sit down at machine B → pull → A's sessions appear in `/resume` immediately. A session changed on both machines (rare) resolves last-edited-wins. The diff is gated by the backend manifest (rebuilt from the cloud on every run), not by the local staging copy — a session counts as synced only once it is actually on the backend, so an interrupted or failed push can never silently masquerade as “already synced” on a later run.
 
 When the two sides differ you pick a direction:
 
@@ -154,7 +154,7 @@ The format is versioned. Importing a backup made by a newer Pi Port than you hav
 git clone https://github.com/andrewjacop/pi-port
 cd pi-port
 npm install
-npm test          # 56 unit tests (paths, staging, scan, vsync wrapper, remap)
+npm test          # 57 unit tests (paths, staging, scan, vsync wrapper, remap)
 npx tsc --noEmit  # typecheck
 ```
 

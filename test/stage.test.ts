@@ -180,7 +180,7 @@ test("diffSessions: local-only, staged-only, collision, same-content skip", asyn
 test("diffSessions: missing dirs are empty diffs, not errors", async () => {
 	const t = await tmp();
 	const diff = await diffSessions(join(t, "nope1"), join(t, "nope2"), "x");
-	assert.deepEqual(diff, { localOnly: [], stagedOnly: [], collisions: [] });
+	assert.deepEqual(diff, { localOnly: [], stagedOnly: [], collisions: [], inSync: 0 });
 });
 
 test("diffSessions: staged copy of identical content is in sync (header-rewrite regression)", async () => {
@@ -209,6 +209,37 @@ test("diffSessions: staged copy of identical content is in sync (header-rewrite 
 	assert.equal(diff.localOnly.length, 0);
 	assert.equal(diff.stagedOnly.length, 0);
 	assert.equal(diff.collisions.length, 0);
+});
+
+test("diffSessions: staged-but-never-pushed file is NOT remote (manifest gate)", async () => {
+	// The user-hit bug: a failed/interrupted push leaves files in staging.
+	// Trusting the staging dir says "in sync" while the cloud has nothing —
+	// the sessions silently never get backed up. The vsync manifest
+	// (backend truth) must gate the staged side.
+	const t = await tmp();
+	const bucket = join(t, "bucket");
+	const stagedDir = join(t, "staged");
+	const LABEL = "optolink";
+	await writeSession(bucket, "s1.jsonl", "id-1", "D:\\proj", "one\n");
+	await writeSession(bucket, "s2.jsonl", "id-2", "D:\\proj", "two\n");
+	// Both staged (a push started) — but the manifest says only s1 reached
+	// the backend; s2 is an orphan from a push that died before uploading.
+	await stageSession(join(bucket, "s1.jsonl"), join(stagedDir, "s1.jsonl"), LABEL);
+	await stageSession(join(bucket, "s2.jsonl"), join(stagedDir, "s2.jsonl"), LABEL);
+	const remoteFiles = new Set([`projects/${LABEL}/sessions/s1.jsonl`]);
+
+	const diff = await diffSessions(bucket, stagedDir, LABEL, remoteFiles);
+	assert.deepEqual(
+		diff.localOnly.map((s) => s.file),
+		["s2.jsonl"],
+	); // orphan resurfaces as local-new → pushed next run
+	assert.equal(diff.stagedOnly.length, 0);
+	assert.equal(diff.collisions.length, 0);
+	assert.equal(diff.inSync, 1);
+	// A staged-only orphan must not masquerade as "remote ahead" either:
+	const orphanOnly = new Set<string>();
+	const d2 = await diffSessions(t, stagedDir, LABEL, orphanOnly);
+	assert.equal(d2.stagedOnly.length, 0);
 });
 
 // ───────────────────────────────────────────── session stage/restore (IO)

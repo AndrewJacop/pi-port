@@ -1,6 +1,6 @@
 {
   "name": "@andrewjacop/pi-port",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Export, import, and cloud-sync your pi agent configuration and sessions between machines",
   "keywords": [
     "pi-package"

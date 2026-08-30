@@ -334,13 +334,19 @@ export function readSessionHeader(raw: string): SessionHeader {
 /**
  * Rewrite ONLY line 1's `cwd` field of a session JSONL; lines 2+ are
  * returned verbatim (byte-identical, including their original newlines).
- * Throws when line 1 isn't JSON — the caller skips such files.
+ * Best-effort: a non-JSON line 1 returns `raw` unchanged (never throws) —
+ * identical malformed bytes then compare as in-sync, which is correct.
  */
 export function rewriteSessionHeader(raw: string, cwd: string): string {
 	const nl = raw.indexOf("\n");
 	const line1 = nl === -1 ? raw : raw.slice(0, nl);
 	const rest = nl === -1 ? "" : raw.slice(nl);
-	const obj = JSON.parse(line1); // Key order is preserved by parse/stringify.
+	let obj: SessionHeader | null = null;
+	try {
+		obj = JSON.parse(line1) as SessionHeader; // Key order is preserved by parse/stringify.
+	} catch {
+		return raw;
+	}
 	obj.cwd = cwd;
 	return JSON.stringify(obj) + rest;
 }
@@ -359,6 +365,8 @@ export interface SessionDiff {
 	stagedOnly: SessionInfo[];
 	/** Same session id on both sides with different content. */
 	collisions: SessionInfo[];
+	/** Same id on both sides, identical after header normalization. */
+	inSync: number;
 }
 
 async function readSessionDir(dir: string): Promise<Map<string, SessionInfo>> {
@@ -388,19 +396,29 @@ async function readSessionDir(dir: string): Promise<Map<string, SessionInfo>> {
 	return map;
 }
 
-/** Diff local bucket vs staged sessions by session id (line-1 header). Same id + same bytes = in sync. */
+/**
+ * Diff local bucket vs staged sessions by session id (line-1 header). Same
+ * id + same bytes = in sync. `remoteFiles` (vsync manifest paths — backend
+ * truth) gates the staged side: files sitting in staging but never actually
+ * pushed (a failed/interrupted push leaves them behind) do NOT count as
+ * remote — they resurface as localOnly and get pushed on the next run.
+ */
 export async function diffSessions(
 	bucketDir: string,
 	stagedDir: string,
 	/** Project label — staged headers carry the label, not the local path. */
 	label: string,
+	/** Backend-tracked paths (e.g. `projects/x/sessions/a.jsonl`); omitted = trust staging. */
+	remoteFiles?: Set<string>,
 ): Promise<SessionDiff> {
+	const isRemote = (file: string) =>
+		!remoteFiles || remoteFiles.has(`projects/${label}/sessions/${file}`);
 	const local = await readSessionDir(bucketDir);
 	const staged = await readSessionDir(stagedDir);
-	const diff: SessionDiff = { localOnly: [], stagedOnly: [], collisions: [] };
+	const diff: SessionDiff = { localOnly: [], stagedOnly: [], collisions: [], inSync: 0 };
 	for (const [id, info] of local) {
 		const remote = staged.get(id);
-		if (!remote) {
+		if (!remote || !isRemote(remote.file)) {
 			diff.localOnly.push(info);
 			continue;
 		}
@@ -411,19 +429,16 @@ export async function diffSessions(
 		const b = await readFile(join(stagedDir, remote.file), "utf8").catch(
 			() => "\u0000",
 		);
-		let differs = true;
-		try {
-			differs = rewriteSessionHeader(a, label) !== b;
-		} catch {
-			differs = true; // malformed header — treat as differing, never crash the diff
-		}
+		const differs = rewriteSessionHeader(a, label) !== b;
 		if (differs) {
 			// ponytail: content compare after id match; mtime proxy decides conflicts (see command flow).
 			diff.collisions.push(info);
+		} else {
+			diff.inSync++;
 		}
 	}
 	for (const [id, info] of staged) {
-		if (!local.has(id)) diff.stagedOnly.push(info);
+		if (!local.has(id) && isRemote(info.file)) diff.stagedOnly.push(info);
 	}
 	return diff;
 }
